@@ -6,9 +6,10 @@ engine's best flight level and, when a Phase 5 advisory exists, at the
 advised cruise speed.
 
 These strings are advisory proposals in a format dispatch systems can parse.
-Aircraft type and equipment are not in the public feed, so they are filed as
-ZZZZ with TYP/ and a generic equipment string; dispatchers must replace them
-before any real filing.
+The aircraft type and wake category come from the engine's type lookup; when
+the type is unknown it is filed as ZZZZ with TYP/. Equipment is not in the
+public feed, so a generic equipment string is used; dispatchers must replace
+it before any real filing.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import math
 from datetime import datetime, timezone
 from typing import Optional
 
+from .aircraft import performance_for
 from .geo import M_TO_NM, MS_TO_KNOTS, format_icao_latlon, great_circle_path, haversine_m
 
 WAYPOINT_SPACING_M = 120 * 1852  # one waypoint about every 120 NM
@@ -69,15 +71,22 @@ def build_flight_plan(row: dict, advised_kt: Optional[int] = None,
     eet_min = math.ceil(dist_nm / max(tas_kt, 1) * 60)
     eet = f"{eet_min // 60:02d}{eet_min % 60:02d}"
 
+    type_code = (row.get("aircraft_type") or "").upper()
+    perf, known = performance_for(type_code)
+    if known:
+        item9, type_note = f"{type_code}/{perf.wake}", ""
+    else:
+        item9, type_note = f"ZZZZ/{perf.wake}", f"TYP/{type_code or 'UNKNOWN'}"
+
     item18 = " ".join(x for x in [
-        "PBN/A1B1C1D1", dep_note, dest_note, "TYP/ZZZZ",
+        "PBN/A1B1C1D1", dep_note, dest_note, type_note,
         f"RMK/AIRSPACE EFFICIENCY ENGINE ADVISORY GREAT CIRCLE FL{level:03d}"
         + (f" SPEED CONTROL N{advised_kt:04d}" if advised_kt else ""),
     ] if x)
 
     callsign = row["callsign"].upper()
     return (f"(FPL-{callsign}-IS\n"
-            f"-ZZZZ/M-{EQUIPMENT}\n"
+            f"-{item9}-{EQUIPMENT}\n"
             f"-{dep}{now:%H%M}\n"
             f"-{route}\n"
             f"-{dest}{eet}\n"

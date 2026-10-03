@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS flight_metrics (
     icao24 TEXT, callsign TEXT, airline TEXT, airline_code TEXT,
     lat REAL, lon REAL, alt_m REAL, gs_ms REAL, track_deg REAL, vrate_ms REAL,
     origin TEXT, destination TEXT, route_source TEXT,
+    aircraft_type TEXT, fuel_basis TEXT, cruise_fuel_kg_min REAL,
     orig_lat REAL, orig_lon REAL, dest_lat REAL, dest_lon REAL, dist_to_dest_m REAL,
     wind_u_ms REAL, wind_v_ms REAL, tas_ms REAL, tailwind_ms REAL, crosswind_ms REAL,
     friction_delta_ms REAL, closure_ms REAL, ideal_closure_ms REAL,
@@ -54,9 +55,13 @@ CREATE TABLE IF NOT EXISTS hub_status (
 );
 """
 
+# Columns added after the first release: (name, SQL type)
+MIGRATIONS = [("aircraft_type", "TEXT"), ("fuel_basis", "TEXT"), ("cruise_fuel_kg_min", "REAL")]
+
 METRIC_COLUMNS = [
     "icao24", "callsign", "airline", "lat", "lon", "alt_m", "gs_ms", "track_deg", "vrate_ms",
-    "origin", "destination", "route_source", "orig_lat", "orig_lon", "dest_lat", "dest_lon",
+    "origin", "destination", "route_source", "aircraft_type", "fuel_basis", "cruise_fuel_kg_min",
+    "orig_lat", "orig_lon", "dest_lat", "dest_lon",
     "dist_to_dest_m", "wind_u_ms", "wind_v_ms", "tas_ms", "tailwind_ms", "crosswind_ms",
     "friction_delta_ms", "closure_ms", "ideal_closure_ms", "lateral_eff", "vertical_eff",
     "best_level_fl", "efficiency", "fuel_kg_min", "co2_kg_min", "waste_co2_kg_min", "phase", "rating",
@@ -69,6 +74,16 @@ class Store:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add columns introduced after a database was first created."""
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(flight_metrics)")}
+        for column, sql_type in MIGRATIONS:
+            if column not in existing:
+                conn.execute(f"ALTER TABLE flight_metrics ADD COLUMN {column} {sql_type}")
+        conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)

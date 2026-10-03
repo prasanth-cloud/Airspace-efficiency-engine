@@ -19,9 +19,9 @@ allows at the same moment:
 Carbon Waste Metric (kg CO2 per minute) = CO2 burn rate x (1 - lateral x vertical).
 
 Model assumptions (documented so they can be refined):
-* Aircraft type is not in the feed, so every aircraft uses a single-aisle
-  reference fuel flow of 40 kg/min in cruise (A320/737 class), scaled for
-  climb and descent.
+* Cruise fuel flow comes from the aircraft type (``engine/aircraft.py``),
+  scaled for climb, descent and distance from the optimum level. Aircraft
+  whose type cannot be found use a single-aisle reference of 40 kg/min.
 * Burning 1 kg of jet fuel releases 3.16 kg of CO2.
 * Aircraft below 10,000 ft or within 60 km of their airports are in
   terminal airspace, where vectoring is normal; they are not scored.
@@ -33,6 +33,7 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Optional
 
+from .aircraft import performance_for
 from .geo import (METERS_TO_FEET, angle_diff, haversine_m, initial_bearing,
                   speed_of_sound_ms)
 from .routes import Route
@@ -68,6 +69,9 @@ class FlightMetrics:
     origin: Optional[str]
     destination: Optional[str]
     route_source: str
+    aircraft_type: Optional[str] = None
+    fuel_basis: str = "default"              # "type" when the aircraft type is known
+    cruise_fuel_kg_min: float = CRUISE_FUEL_KG_MIN
     dest_lat: Optional[float] = None
     dest_lon: Optional[float] = None
     orig_lat: Optional[float] = None
@@ -95,8 +99,9 @@ class FlightMetrics:
         return asdict(self)
 
 
-def fuel_flow_kg_min(alt_m: Optional[float], vrate_ms: Optional[float]) -> float:
-    ff = CRUISE_FUEL_KG_MIN
+def fuel_flow_kg_min(alt_m: Optional[float], vrate_ms: Optional[float],
+                     cruise_kg_min: float = CRUISE_FUEL_KG_MIN) -> float:
+    ff = cruise_kg_min
     if alt_m is not None:
         fl = alt_m * METERS_TO_FEET / 100
         ff *= level_factor(fl) if fl >= 200 else 1.0 + 0.4 * (1 - fl / 200)
@@ -125,8 +130,12 @@ def ideal_closure(tas: float, u: float, v: float, course_deg: float) -> Optional
     return math.sqrt(tas ** 2 - across ** 2) + along
 
 
-def analyse_flight(f, route: Optional[Route], winds: WindField) -> FlightMetrics:
+def analyse_flight(f, route: Optional[Route], winds: WindField,
+                   aircraft_type: Optional[str] = None) -> FlightMetrics:
     from .airports import airline_name  # local import keeps module load light
+
+    type_code = (aircraft_type or getattr(f, "aircraft_type", None) or "").strip().upper() or None
+    perf, known = performance_for(type_code)
 
     m = FlightMetrics(
         icao24=f.icao24, callsign=f.callsign, airline=airline_name(f.callsign),
@@ -135,6 +144,9 @@ def analyse_flight(f, route: Optional[Route], winds: WindField) -> FlightMetrics
         origin=route.origin.iata or route.origin.code if route else None,
         destination=route.destination.iata or route.destination.code if route else None,
         route_source=route.source if route else "unknown",
+        aircraft_type=type_code,
+        fuel_basis="type" if known else "default",
+        cruise_fuel_kg_min=perf.cruise_fuel_kg_min,
     )
     if route:
         m.dest_lat, m.dest_lon = route.destination.lat, route.destination.lon
@@ -146,7 +158,7 @@ def analyse_flight(f, route: Optional[Route], winds: WindField) -> FlightMetrics
 
     vr = f.vertical_rate_ms or 0.0
     m.phase = "climb" if vr > LEVEL_VRATE_MS else "descent" if vr < -LEVEL_VRATE_MS else "cruise"
-    m.fuel_kg_min = fuel_flow_kg_min(f.baro_altitude_m, f.vertical_rate_ms)
+    m.fuel_kg_min = fuel_flow_kg_min(f.baro_altitude_m, f.vertical_rate_ms, m.cruise_fuel_kg_min)
     m.co2_kg_min = m.fuel_kg_min * CO2_PER_KG_FUEL
 
     # Wind triangle at the aircraft's exact 3D position

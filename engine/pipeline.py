@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import flight_tracker as ft
+from .aircraft import AircraftResolver
 from .dashboard import build_scoreboard
 from .efficiency import FlightMetrics, analyse_flight
 from .mapview import build_engine_map
@@ -67,7 +68,10 @@ def run_once(cfg: EngineConfig, store: Store | None = None) -> RunResult:
     # Phase 3: routes and efficiency
     resolver = RouteResolver(cfg.data_dir, offline=cfg.offline_routes or source != "LIVE")
     routes = resolver.resolve_many(flights)
-    metrics = [analyse_flight(f, routes.get(f.callsign), winds) for f in flights]
+    types = AircraftResolver(cfg.data_dir, offline=cfg.offline_routes or source != "LIVE").resolve_many(flights)
+    metrics = [analyse_flight(f, routes.get(f.callsign), winds, types.get(f.icao24)) for f in flights]
+    typed = sum(m.fuel_basis == "type" for m in metrics)
+    log.info("Aircraft type known for %d of %d flights.", typed, len(metrics))
     scored = [m for m in metrics if m.efficiency is not None]
     log.info("Scored %d of %d flights; excess burn %.0f kg CO2/min.",
              len(scored), len(metrics), sum(m.waste_co2_kg_min for m in scored))
