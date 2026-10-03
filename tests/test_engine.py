@@ -385,5 +385,95 @@ class BulkAircraftDatabaseTests(unittest.TestCase):
         self.assertLess(len(calls), 40)  # the breaker stopped the batch early
 
 
+class OpenSkyHistoryTests(unittest.TestCase):
+    """Routes from OpenSky flight history replace stale callsign routes."""
+
+    AIRPORTS_CSV = ("id,ident,type,name,latitude_deg,longitude_deg,gps_code,iata_code\n"
+                    "1,KMCO,large_airport,Orlando International,28.4294,-81.3090,KMCO,MCO\n"
+                    "2,KPVD,medium_airport,Providence,41.7240,-71.4282,KPVD,PVD\n"
+                    "3,X01,heliport,Somewhere,30,-80,,\n")
+
+    def make_history(self, tmp, rows, now):
+        from unittest import mock
+        from engine.history import FlightHistory, build_airport_index
+        airports = build_airport_index(self.AIRPORTS_CSV)
+        self.assertEqual(set(airports), {"KMCO", "KPVD"})
+        history = FlightHistory(Path(tmp), token_fn=lambda s: "token", airports=airports)
+        calls = []
+
+        def fake_get(self_, url, params=None, timeout=None):
+            calls.append(params)
+            start = params["begin"]
+            body = [r for r in rows if start <= r["lastSeen"] < start + 7200]
+            return mock.Mock(status_code=200 if body else 404, json=lambda: body, raise_for_status=lambda: None)
+
+        with mock.patch("requests.Session.get", fake_get):
+            history.refresh(now=now)
+        return history, calls
+
+    def test_history_route_replaces_stale_adsbdb_route(self):
+        from engine.routes import Endpoint, Route, choose_route
+        now = 1_790_000_000
+        rows = [
+            # yesterday DAL123 flew ATL-BOS, today the aircraft landed at MCO and DAL123 now flies MCO-PVD
+            {"callsign": "DAL123 ", "icao24": "a1b2c3", "estDepartureAirport": "KATL",
+             "estArrivalAirport": "KBOS", "firstSeen": now - 30 * 3600, "lastSeen": now - 28 * 3600},
+            {"callsign": "DAL123 ", "icao24": "a00001", "estDepartureAirport": "KMCO",
+             "estArrivalAirport": "KPVD", "firstSeen": now - 26 * 3600, "lastSeen": now - 24 * 3600},
+            {"callsign": "DAL900", "icao24": "a1b2c3", "estDepartureAirport": "KJFK",
+             "estArrivalAirport": "KMCO", "firstSeen": now - 6 * 3600, "lastSeen": now - 3 * 3600},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            history, calls = self.make_history(tmp, rows, now)
+            self.assertEqual(len(calls), 4)  # a few windows per cycle, newest first
+            self.assertEqual(history.routes_for("DAL123"), [])  # older windows not fetched yet
+            for _ in range(6):
+                history, _ = self.make_history(tmp, rows, now)
+            self.assertEqual(history.routes_for("DAL123"), [("KMCO", "KPVD"), ("KATL", "KBOS")])
+            self.assertEqual(history.departure_hint("A1B2C3", now=now), "KMCO")
+
+            stale = Route(Endpoint("KATL", "ATL", "Atlanta", 33.6407, -84.4277),
+                          Endpoint("KBOS", "BOS", "Boston", 42.3656, -71.0096), "adsbdb")
+            mid = geo.great_circle_point(28.4294, -81.3090, 41.7240, -71.4282, 0.5)
+            f = make_flight(*mid, geo.initial_bearing(*mid, 41.7240, -71.4282))
+            f.callsign, f.icao24 = "DAL123", "a1b2c3"
+            route = choose_route(f, stale, history)
+            self.assertEqual((route.origin.code, route.destination.iata, route.source), ("KMCO", "PVD", "opensky"))
+            m = analyse_flight(f, route, uniform_field(0, 0))
+            self.assertEqual(m.route_source, "opensky")
+            self.assertIsNotNone(m.lateral_eff)
+
+            # an aircraft on the ATL-BOS line keeps that route, now confirmed by OpenSky
+            on_atl = geo.great_circle_point(33.6407, -84.4277, 42.3656, -71.0096, 0.5)
+            g = make_flight(*on_atl, geo.initial_bearing(*on_atl, 42.3656, -71.0096))
+            g.callsign, g.icao24 = "DAL123", "ffffff"
+            self.assertEqual(choose_route(g, stale, history).source, "opensky")
+            # no history for the callsign: the adsbdb route is left to the mismatch test
+            g.callsign = "UAL1"
+            self.assertIs(choose_route(g, stale, history), stale)
+
+    def test_no_credentials_means_no_requests(self):
+        from unittest import mock
+        from engine.history import FlightHistory
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("requests.Session.get", side_effect=AssertionError("no network expected")):
+            self.assertEqual(FlightHistory(Path(tmp), token_fn=lambda s: None, airports={}).refresh(), 0)
+            self.assertEqual(FlightHistory(Path(tmp), offline=True, token_fn=lambda s: "t", airports={}).refresh(), 0)
+
+    def test_rate_limit_stops_the_backfill(self):
+        from unittest import mock
+        from engine.history import FlightHistory
+        calls = []
+
+        def fake_get(self_, url, params=None, timeout=None):
+            calls.append(params)
+            return mock.Mock(status_code=429)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("requests.Session.get", fake_get):
+            history = FlightHistory(Path(tmp), token_fn=lambda s: "t", airports={})
+            self.assertEqual(history.refresh(), 0)
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

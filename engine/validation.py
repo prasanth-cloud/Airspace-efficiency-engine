@@ -131,6 +131,7 @@ class LiveCheck:
     median_route_extension: Optional[float] = None
     mismatch_share: Optional[float] = None
     worst_share: Optional[float] = None      # samples with lateral efficiency below 50%
+    opensky_share: Optional[float] = None    # routes confirmed by OpenSky flight history
 
     @property
     def route_extension_plausible(self) -> Optional[bool]:
@@ -157,8 +158,9 @@ def check_live_data(db_path: Path) -> LiveCheck:
         row = conn.execute(f"""
             SELECT COUNT(fm.lateral_eff), AVG(1 - fm.lateral_eff),
                    AVG(CASE WHEN fm.fuel_basis = 'type' THEN 1.0 ELSE 0.0 END),
-                   AVG(CASE WHEN fm.route_source IN ('adsbdb', 'simulated') THEN 1.0 ELSE 0.0 END),
+                   AVG(CASE WHEN fm.route_source IN ('opensky', 'adsbdb', 'simulated') THEN 1.0 ELSE 0.0 END),
                    AVG(CASE WHEN fm.route_source = 'mismatch' THEN 1.0 ELSE 0.0 END),
+                   AVG(CASE WHEN fm.route_source = 'opensky' THEN 1.0 ELSE 0.0 END),
                    AVG(CASE WHEN fm.lateral_eff IS NULL THEN NULL WHEN fm.lateral_eff < 0.5 THEN 1.0 ELSE 0.0 END)
             FROM flight_metrics fm JOIN runs r ON r.id = fm.run_id
             WHERE {live}
@@ -166,9 +168,9 @@ def check_live_data(db_path: Path) -> LiveCheck:
         values = [v for (v,) in conn.execute(f"""
             SELECT 1 - fm.lateral_eff FROM flight_metrics fm JOIN runs r ON r.id = fm.run_id
             WHERE {live} AND fm.lateral_eff IS NOT NULL ORDER BY 1""", (SCORING_VERSION,))]
-    samples, ext, type_cov, route_cov, mismatch, worst = row
+    samples, ext, type_cov, route_cov, mismatch, opensky, worst = row
     median = values[len(values) // 2] if values else None
-    return LiveCheck(runs, samples or 0, ext, type_cov, route_cov, median, mismatch, worst)
+    return LiveCheck(runs, samples or 0, ext, type_cov, route_cov, median, mismatch, worst, opensky)
 
 
 def render_report(fuel: list[FuelCheck], live: LiveCheck) -> str:
@@ -193,6 +195,8 @@ def render_report(fuel: list[FuelCheck], live: LiveCheck) -> str:
             f"- Aircraft type known: {live.type_coverage * 100:.0f}% of observations" if live.type_coverage is not None else "- Aircraft type coverage: n/a",
             f"- Route known and consistent with the aircraft's position: {live.route_coverage * 100:.0f}% of observations"
             if live.route_coverage is not None else "- Route coverage: n/a",
+            f"- Routes confirmed by OpenSky flight history: {live.opensky_share * 100:.0f}% of observations"
+            if live.opensky_share is not None else "- OpenSky-confirmed routes: n/a",
             f"- Looked-up routes rejected as stale (aircraft not flying them): {live.mismatch_share * 100:.0f}% of observations"
             if live.mismatch_share is not None else "- Rejected routes: n/a",
             f"- Median lateral inefficiency: {live.median_route_extension * 100:.2f}%; "

@@ -16,6 +16,7 @@ from .dashboard import build_scoreboard
 from .efficiency import FlightMetrics, analyse_flight
 from .mapview import build_engine_map
 from .queueing import HubQueue, plan_arrivals
+from .history import FlightHistory, credentials_configured
 from .routes import RouteResolver
 from .store import Store
 from .winds import WindField, load_wind_field
@@ -66,9 +67,14 @@ def run_once(cfg: EngineConfig, store: Store | None = None) -> RunResult:
     winds = load_wind_field(cfg.bbox, cfg.data_dir, offline=cfg.offline_winds)
 
     # Phase 3: routes and efficiency
-    resolver = RouteResolver(cfg.data_dir, offline=cfg.offline_routes or source != "LIVE")
+    offline_lookups = cfg.offline_routes or source != "LIVE"
+    history = None
+    if not offline_lookups and credentials_configured():
+        history = FlightHistory(cfg.data_dir, token_fn=ft.get_access_token)
+        history.refresh()
+    resolver = RouteResolver(cfg.data_dir, offline=offline_lookups, history=history)
     routes = resolver.resolve_many(flights)
-    types = AircraftResolver(cfg.data_dir, offline=cfg.offline_routes or source != "LIVE").resolve_many(flights)
+    types = AircraftResolver(cfg.data_dir, offline=offline_lookups).resolve_many(flights)
     metrics = [analyse_flight(f, routes.get(f.callsign), winds, types.get(f.icao24)) for f in flights]
     typed = sum(m.fuel_basis == "type" for m in metrics)
     log.info("Aircraft type known for %d of %d flights.", typed, len(metrics))
