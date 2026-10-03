@@ -475,5 +475,106 @@ class OpenSkyHistoryTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
+NAS_XML = """<AIRPORT_STATUS_INFORMATION><Update_Time>now</Update_Time>
+<Delay_type><Name>Ground Delay Programs</Name><Ground_Delay_List><listLength>1</listLength>
+  <Ground_Delay><ARPT>BOS</ARPT><Reason>low ceilings</Reason><Avg>1 hour and 2 minutes</Avg><Max>2 hours</Max></Ground_Delay>
+</Ground_Delay_List></Delay_type>
+<Delay_type><Name>General Arrival/Departure Delay Info</Name><Arrival_Departure_Delay_List>
+  <Delay><ARPT>ATL</ARPT><Reason>VOL:Volume</Reason>
+    <Arrival_Departure Type="Arrival"><Min>16 minutes</Min><Max>30 minutes</Max><Trend>Increasing</Trend></Arrival_Departure></Delay>
+  <Delay><ARPT>MCO</ARPT><Reason>TM Initiatives</Reason>
+    <Arrival_Departure Type="Departure"><Min>31 minutes</Min><Max>45 minutes</Max></Arrival_Departure></Delay>
+</Arrival_Departure_Delay_List></Delay_type>
+<Delay_type><Name>Ground Stop Programs</Name><Ground_Stop_List>
+  <Program><ARPT>LGA</ARPT><Reason>thunderstorms</Reason><End_Time>18:00</End_Time></Program>
+</Ground_Stop_List></Delay_type>
+<Delay_type><Name>Airport Closures</Name><Airport_Closure_List>
+  <Airport><ARPT>PHL</ARPT><Reason>runway work</Reason></Airport></Airport_Closure_List></Delay_type>
+</AIRPORT_STATUS_INFORMATION>"""
+
+
+class CauseAttributionTests(unittest.TestCase):
+    """Each flight's excess CO2 is put down to congestion, weather, airspace, routing or flight level."""
+
+    def scored(self, lat, lon, dest, track_offset=40.0, alt_m=11_000):
+        from engine.airports import AIRPORTS
+        from engine.routes import Endpoint, Route
+        d = AIRPORTS[dest]
+        origin = Endpoint("KTST", "TST", "Test origin", *geo.great_circle_point(
+            d.lat, d.lon, lat, lon, 1 + 600_000 / geo.haversine_m(d.lat, d.lon, lat, lon)))  # 600 km behind
+        route = Route(origin, Endpoint(d.icao, d.iata, d.name, d.lat, d.lon), "opensky")
+        f = make_flight(lat, lon, geo.initial_bearing(lat, lon, d.lat, d.lon) + track_offset)
+        f.baro_altitude_m = alt_m
+        m = analyse_flight(f, route, uniform_field(0, 0))
+        self.assertEqual(m.route_source, "opensky")
+        self.assertIsNotNone(m.waste_co2_kg_min)
+        return m
+
+    def test_nas_status_parsing(self):
+        from engine.causes import parse_nas_status
+        d = parse_nas_status(NAS_XML)
+        self.assertEqual(set(d), {"BOS", "ATL", "LGA"})  # departure delays and closures are ignored
+        self.assertEqual((d["BOS"].kind, d["BOS"].minutes), ("Ground Delay Program", 62))
+        self.assertEqual((d["ATL"].kind, d["ATL"].minutes, d["ATL"].reason), ("Arrival delay", 30, "VOL:Volume"))
+        self.assertEqual(d["LGA"].kind, "Ground Stop")
+
+    def test_congestion_only_near_the_delayed_destination(self):
+        from engine.causes import CauseContext, attribute, parse_nas_status
+        ctx = CauseContext(hub_delays=parse_nas_status(NAS_XML))
+        near = self.scored(*geo.great_circle_point(33.64, -84.43, 42.3656, -71.0096, 0.85), "BOS")
+        attribute(near, ctx)
+        self.assertEqual(near.lateral_cause, "congestion")
+        self.assertIn("ground delay program", near.lateral_cause_detail)
+        far = self.scored(*geo.great_circle_point(33.64, -84.43, 42.3656, -71.0096, 0.3), "BOS")
+        attribute(far, ctx)
+        self.assertNotEqual(far.lateral_cause, "congestion")
+        self.assertAlmostEqual(far.waste_lateral_kg_min + far.waste_vertical_kg_min, far.waste_co2_kg_min)
+
+    def test_weather_airspace_and_routing(self):
+        from engine.causes import CauseContext, attribute, parse_sigmets
+        start = (35.0, -80.0)  # Charlotte area, flying to Boston
+        storm = parse_sigmets([{"hazard": "CONVECTIVE", "seriesId": "42E",
+                                "coords": [{"lat": 37.5, "lon": -78.5}, {"lat": 37.5, "lon": -76.5},
+                                           {"lat": 38.5, "lon": -76.5}, {"lat": 38.5, "lon": -78.5}]},
+                               {"hazard": "TURB", "coords": [{"lat": 0, "lon": 0}] * 3}])
+        self.assertEqual([n for n, _ in storm], ["Convective SIGMET 42E"])
+        m = self.scored(*start, "BOS")
+        attribute(m, CauseContext(sigmets=storm))
+        self.assertEqual((m.lateral_cause, m.lateral_cause_detail), ("weather", "Convective SIGMET 42E"))
+
+        offshore = self.scored(31.0, -77.0, "BOS")  # direct path runs up the offshore warning areas
+        attribute(offshore, CauseContext())
+        self.assertEqual(offshore.lateral_cause, "airspace")
+        self.assertIn("approx.", offshore.lateral_cause_detail)
+
+        inland = self.scored(40.0, -83.0, "JFK")
+        attribute(inland, CauseContext())
+        self.assertEqual(inland.lateral_cause, "routing")
+
+    def test_flight_level_is_main_cause_when_vertical_waste_dominates(self):
+        from engine.causes import CauseContext, attribute
+        m = self.scored(40.0, -83.0, "JFK", track_offset=2.0, alt_m=8_600)  # on course, FL280
+        attribute(m, CauseContext())
+        self.assertGreater(m.waste_vertical_kg_min, m.waste_lateral_kg_min)
+        self.assertEqual(m.cause, "flight_level")
+
+    def test_route_waste_report(self):
+        from engine.store import Store
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = EngineConfig(bbox=BBOX, data_dir=Path(tmp) / "data", output_dir=Path(tmp),
+                               force_mock=True, offline_winds=True, offline_routes=True)
+            store = Store(cfg.db_path)
+            run_once(cfg, store)
+            run_once(cfg, store)
+            report = store.route_waste(include_simulated=True, min_samples=1)
+            self.assertEqual(report["runs"], 2)
+            self.assertTrue(report["routes"])
+            top = report["routes"][0]
+            self.assertAlmostEqual(sum(top["by_cause_t_per_week"].values()), top["t_co2_per_week"], places=6)
+            self.assertEqual(store.route_waste()["routes"], [])  # simulated runs never reach the public view
+            page = (Path(tmp) / "scoreboard.html").read_text(encoding="utf-8")
+            self.assertIn("Routes wasting the most CO2, and why", page)
+
+
 if __name__ == "__main__":
     unittest.main()

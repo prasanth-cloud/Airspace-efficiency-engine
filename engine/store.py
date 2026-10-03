@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS runs (
     n_flights     INTEGER NOT NULL,
     n_scored      INTEGER NOT NULL,
     total_waste_co2_kg_min REAL NOT NULL,
-    scoring_version INTEGER NOT NULL DEFAULT 1
+    scoring_version INTEGER NOT NULL DEFAULT 1,
+    cause_feeds TEXT
 );
 CREATE TABLE IF NOT EXISTS flight_metrics (
     run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -37,7 +38,9 @@ CREATE TABLE IF NOT EXISTS flight_metrics (
     wind_u_ms REAL, wind_v_ms REAL, tas_ms REAL, tailwind_ms REAL, crosswind_ms REAL,
     friction_delta_ms REAL, closure_ms REAL, ideal_closure_ms REAL,
     lateral_eff REAL, vertical_eff REAL, best_level_fl INTEGER, efficiency REAL,
-    fuel_kg_min REAL, co2_kg_min REAL, waste_co2_kg_min REAL, phase TEXT, rating TEXT
+    fuel_kg_min REAL, co2_kg_min REAL, waste_co2_kg_min REAL, phase TEXT, rating TEXT,
+    waste_lateral_kg_min REAL, waste_vertical_kg_min REAL,
+    lateral_cause TEXT, lateral_cause_detail TEXT, cause TEXT, cause_detail TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_fm_run ON flight_metrics(run_id);
 CREATE INDEX IF NOT EXISTS ix_fm_airline ON flight_metrics(airline_code);
@@ -62,6 +65,13 @@ MIGRATIONS = [
     ("flight_metrics", "fuel_basis", "TEXT"),
     ("flight_metrics", "cruise_fuel_kg_min", "REAL"),
     ("runs", "scoring_version", "INTEGER NOT NULL DEFAULT 1"),  # runs before versioning count as 1
+    ("runs", "cause_feeds", "TEXT"),                            # NULL for runs before cause attribution
+    ("flight_metrics", "waste_lateral_kg_min", "REAL"),
+    ("flight_metrics", "waste_vertical_kg_min", "REAL"),
+    ("flight_metrics", "lateral_cause", "TEXT"),
+    ("flight_metrics", "lateral_cause_detail", "TEXT"),
+    ("flight_metrics", "cause", "TEXT"),
+    ("flight_metrics", "cause_detail", "TEXT"),
 ]
 
 METRIC_COLUMNS = [
@@ -71,6 +81,7 @@ METRIC_COLUMNS = [
     "dist_to_dest_m", "wind_u_ms", "wind_v_ms", "tas_ms", "tailwind_ms", "crosswind_ms",
     "friction_delta_ms", "closure_ms", "ideal_closure_ms", "lateral_eff", "vertical_eff",
     "best_level_fl", "efficiency", "fuel_kg_min", "co2_kg_min", "waste_co2_kg_min", "phase", "rating",
+    "waste_lateral_kg_min", "waste_vertical_kg_min", "lateral_cause", "lateral_cause_detail", "cause", "cause_detail",
 ]
 
 
@@ -101,14 +112,16 @@ class Store:
     # -- writes ---------------------------------------------------------------
 
     def save_run(self, ts_utc: str, source: str, wind_source: str, wind_valid: str,
-                 metrics: list[FlightMetrics], queues: list[HubQueue]) -> int:
+                 metrics: list[FlightMetrics], queues: list[HubQueue],
+                 cause_feeds: Optional[list[str]] = None) -> int:
         scored = [m for m in metrics if m.efficiency is not None]
         with closing(self._connect()) as conn, conn:
             cur = conn.execute(
                 "INSERT INTO runs (ts_utc, source, wind_source, wind_valid, n_flights, n_scored, "
-                "total_waste_co2_kg_min, scoring_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "total_waste_co2_kg_min, scoring_version, cause_feeds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (ts_utc, source, wind_source, wind_valid, len(metrics), len(scored),
-                 sum(m.waste_co2_kg_min or 0 for m in scored), SCORING_VERSION),
+                 sum(m.waste_co2_kg_min or 0 for m in scored), SCORING_VERSION,
+                 None if cause_feeds is None else ",".join(cause_feeds)),
             )
             run_id = cur.lastrowid
             placeholders = ", ".join("?" * (len(METRIC_COLUMNS) + 2))
@@ -186,6 +199,59 @@ class Store:
         """
         with closing(self._connect()) as conn:
             return [dict(r) for r in conn.execute(sql, (f"-{days} days", min_samples))]
+
+    def route_waste(self, days: int = 7, min_samples: int = 3, include_simulated: bool = False,
+                    limit: int = 25) -> dict:
+        """Routes ranked by estimated weekly excess CO2, split by cause.
+
+        Each observation stands for the minutes until the next run (capped at
+        15). A route's weekly figure is its observed excess CO2 divided by the
+        minutes observed, times the minutes in a week. Only runs with cause
+        attribution count, and only the part of each flight inside the
+        geofence that the engine scores.
+        """
+        source_filter = "" if include_simulated else "AND source = 'LIVE'"
+        lateral = ", ".join(
+            f"SUM(CASE WHEN fm.lateral_cause = '{c}' THEN fm.waste_lateral_kg_min * w.minutes ELSE 0 END) AS {c}_kg"
+            for c in ("congestion", "weather", "airspace", "routing"))
+        sql = f"""
+            WITH r AS (
+                SELECT id, ts_utc FROM runs
+                WHERE cause_feeds IS NOT NULL AND scoring_version = {SCORING_VERSION} {source_filter}
+                  AND ts_utc >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)),
+            w AS (
+                SELECT id, MIN(15.0, COALESCE(
+                    (julianday(LEAD(ts_utc) OVER (ORDER BY ts_utc)) - julianday(ts_utc)) * 1440, 5.0)) AS minutes
+                FROM r)
+            SELECT fm.origin, fm.destination, COUNT(*) AS samples, COUNT(DISTINCT fm.callsign) AS flights,
+                   SUM(fm.waste_co2_kg_min * w.minutes) AS total_kg, {lateral},
+                   SUM(COALESCE(fm.waste_vertical_kg_min, 0) * w.minutes) AS flight_level_kg
+            FROM flight_metrics fm JOIN w ON w.id = fm.run_id
+            WHERE fm.waste_lateral_kg_min IS NOT NULL AND fm.origin IS NOT NULL AND fm.destination IS NOT NULL
+            GROUP BY fm.origin, fm.destination HAVING COUNT(*) >= ?
+            ORDER BY total_kg DESC
+        """
+        with closing(self._connect()) as conn:
+            minutes = [row[0] for row in conn.execute(f"""
+                WITH r AS (SELECT id, ts_utc FROM runs WHERE cause_feeds IS NOT NULL
+                           AND scoring_version = {SCORING_VERSION} {source_filter}
+                           AND ts_utc >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?))
+                SELECT MIN(15.0, COALESCE(
+                    (julianday(LEAD(ts_utc) OVER (ORDER BY ts_utc)) - julianday(ts_utc)) * 1440, 5.0)) FROM r""",
+                (f"-{days} days",))]
+            rows = [dict(r) for r in conn.execute(sql, (f"-{days} days", min_samples))]
+        covered = sum(minutes)
+        scale = (7 * 24 * 60 / covered / 1000) if covered else 0.0  # kg observed -> tonnes per week
+        routes = []
+        for r in rows:
+            by_cause = {c: r.pop(f"{c}_kg") * scale for c in ("congestion", "weather", "airspace", "routing",
+                                                              "flight_level")}
+            routes.append({**{k: r[k] for k in ("origin", "destination", "samples", "flights")},
+                           "t_co2_per_week": r["total_kg"] * scale, "by_cause_t_per_week": by_cause,
+                           "main_cause": max(by_cause, key=by_cause.get) if any(by_cause.values()) else None})
+        return {"runs": len(minutes), "observed_hours": covered / 60, "routes": routes[:limit],
+                "by_cause_t_per_week": {c: sum(rt["by_cause_t_per_week"][c] for rt in routes)
+                                        for c in ("congestion", "weather", "airspace", "routing", "flight_level")}}
 
     def run_count(self, live_only: bool = True) -> int:
         with closing(self._connect()) as conn:
