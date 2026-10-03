@@ -48,9 +48,9 @@ py -m unittest discover tests -v # test suite
 | 5 | `engine/queueing.py` | Projects arrivals 3 hours ahead at the priority hubs and runs a first-come, first-served runway slot model. Builds a speed-reduction matrix that absorbs delay at cruise instead of holding. |
 | 6 | `engine/api.py`, `engine/flightplan.py` | FastAPI B2B endpoints. Generates ICAO FPL strings with great-circle DCT routing. |
 
-Origin and destination for live flights come from adsbdb.com and are cached for a day. Flights with no known route are not scored laterally.
+Origin and destination for live flights come from adsbdb.com and are cached for a day. Callsign route data goes stale, so a route is discarded when the aircraft is plainly not flying it. That covers an aircraft far off the route line, beyond either end of it, or outside the terminal area and heading away from the destination. Flights with no usable route are not scored laterally.
 
-Aircraft types come from adsbdb.com, with OpenSky aircraft metadata as a backup, and are cached for 30 days. `engine/aircraft.py` holds cruise fuel flows for about 50 common types.
+Aircraft types come first from OpenSky's bulk aircraft database. The engine downloads it into `data/` on the first run and refreshes it monthly. If the download fails, you can download `aircraftDatabase.csv` from OpenSky yourself and put it in `data/`. Anything missing from it is looked up on adsbdb.com, with OpenSky metadata as a backup, and cached for 30 days. `engine/aircraft.py` holds cruise fuel flows for about 50 common types.
 
 ## Assumptions to keep in mind
 
