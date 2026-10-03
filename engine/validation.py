@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from .aircraft import AircraftPerformance, performance_for
-from .efficiency import fuel_flow_kg_min
+from .efficiency import SCORING_VERSION, fuel_flow_kg_min
 from .geo import METERS_TO_FEET
 from .store import Store
 
@@ -128,6 +128,9 @@ class LiveCheck:
     mean_route_extension: Optional[float]
     type_coverage: Optional[float]
     route_coverage: Optional[float]
+    median_route_extension: Optional[float] = None
+    mismatch_share: Optional[float] = None
+    worst_share: Optional[float] = None      # samples with lateral efficiency below 50%
 
     @property
     def route_extension_plausible(self) -> Optional[bool]:
@@ -142,21 +145,30 @@ def check_live_data(db_path: Path) -> LiveCheck:
 
     Lateral inefficiency (1 - lateral efficiency) on en-route aircraft is the
     engine's equivalent of route extension; FAA17 puts the US average at 2.86%.
+    Only runs scored with the current SCORING_VERSION are used, so results from
+    older, superseded scoring rules do not distort the comparison.
     """
     if not db_path.exists():
         return LiveCheck(0, 0, None, None, None)
-    Store(db_path)  # migrates databases created before the fuel_basis column existed
+    Store(db_path)  # migrates databases created before newer columns existed
+    live = "r.source = 'LIVE' AND r.scoring_version = ?"
     with closing(sqlite3.connect(db_path)) as conn:
-        runs = conn.execute("SELECT COUNT(*) FROM runs WHERE source = 'LIVE'").fetchone()[0]
-        row = conn.execute("""
+        runs = conn.execute(f"SELECT COUNT(*) FROM runs r WHERE {live}", (SCORING_VERSION,)).fetchone()[0]
+        row = conn.execute(f"""
             SELECT COUNT(fm.lateral_eff), AVG(1 - fm.lateral_eff),
                    AVG(CASE WHEN fm.fuel_basis = 'type' THEN 1.0 ELSE 0.0 END),
-                   AVG(CASE WHEN fm.route_source != 'unknown' THEN 1.0 ELSE 0.0 END)
+                   AVG(CASE WHEN fm.route_source IN ('adsbdb', 'simulated') THEN 1.0 ELSE 0.0 END),
+                   AVG(CASE WHEN fm.route_source = 'mismatch' THEN 1.0 ELSE 0.0 END),
+                   AVG(CASE WHEN fm.lateral_eff IS NULL THEN NULL WHEN fm.lateral_eff < 0.5 THEN 1.0 ELSE 0.0 END)
             FROM flight_metrics fm JOIN runs r ON r.id = fm.run_id
-            WHERE r.source = 'LIVE'
-        """).fetchone()
-    samples, ext, type_cov, route_cov = row
-    return LiveCheck(runs, samples or 0, ext, type_cov, route_cov)
+            WHERE {live}
+        """, (SCORING_VERSION,)).fetchone()
+        values = [v for (v,) in conn.execute(f"""
+            SELECT 1 - fm.lateral_eff FROM flight_metrics fm JOIN runs r ON r.id = fm.run_id
+            WHERE {live} AND fm.lateral_eff IS NOT NULL ORDER BY 1""", (SCORING_VERSION,))]
+    samples, ext, type_cov, route_cov, mismatch, worst = row
+    median = values[len(values) // 2] if values else None
+    return LiveCheck(runs, samples or 0, ext, type_cov, route_cov, median, mismatch, worst)
 
 
 def render_report(fuel: list[FuelCheck], live: LiveCheck) -> str:
@@ -179,7 +191,13 @@ def render_report(fuel: list[FuelCheck], live: LiveCheck) -> str:
             f"- LIVE runs: {live.runs}, scored lateral samples: {live.scored_samples:,}",
             f"- Mean lateral inefficiency: {ext} vs US benchmark {US_ROUTE_EXTENSION_BENCHMARK * 100:.2f}% [FAA17]: {verdict}",
             f"- Aircraft type known: {live.type_coverage * 100:.0f}% of observations" if live.type_coverage is not None else "- Aircraft type coverage: n/a",
-            f"- Route known: {live.route_coverage * 100:.0f}% of observations" if live.route_coverage is not None else "- Route coverage: n/a",
+            f"- Route known and consistent with the aircraft's position: {live.route_coverage * 100:.0f}% of observations"
+            if live.route_coverage is not None else "- Route coverage: n/a",
+            f"- Looked-up routes rejected as stale (aircraft not flying them): {live.mismatch_share * 100:.0f}% of observations"
+            if live.mismatch_share is not None else "- Rejected routes: n/a",
+            f"- Median lateral inefficiency: {live.median_route_extension * 100:.2f}%; "
+            f"samples below 50% efficiency: {live.worst_share * 100:.0f}%"
+            if live.median_route_extension is not None and live.worst_share is not None else "- Distribution: n/a",
             "",
             "The engine measures inefficiency at each moment against a wind-aware great circle, while the benchmark "
             "measures flown distance against the great circle for whole flights, so agreement within a few points is "

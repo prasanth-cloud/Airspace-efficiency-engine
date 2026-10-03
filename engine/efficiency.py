@@ -23,8 +23,11 @@ Model assumptions (documented so they can be refined):
   scaled for climb, descent and distance from the optimum level. Aircraft
   whose type cannot be found use a single-aisle reference of 40 kg/min.
 * Burning 1 kg of jet fuel releases 3.16 kg of CO2.
-* Aircraft below 10,000 ft or within 60 km of their airports are in
-  terminal airspace, where vectoring is normal; they are not scored.
+* Aircraft below 10,000 ft or within 40 NM of their airports are in
+  terminal airspace, where vectoring is normal; they are not scored. 40 NM is
+  the terminal boundary the FAA/EUROCONTROL en-route efficiency benchmark uses.
+* A looked-up route the aircraft is plainly not flying (see
+  ``routes.route_mismatch``) is discarded and marked ``mismatch``.
 """
 
 from __future__ import annotations
@@ -36,8 +39,12 @@ from typing import Optional
 from .aircraft import performance_for
 from .geo import (METERS_TO_FEET, angle_diff, haversine_m, initial_bearing,
                   speed_of_sound_ms)
-from .routes import Route
+from .routes import Route, route_mismatch
 from .winds import WindField
+
+# Bump when a change makes earlier stored scores incomparable; the scoreboard
+# and validation only use runs scored with the current version.
+SCORING_VERSION = 2
 
 CO2_PER_KG_FUEL = 3.16
 CRUISE_FUEL_KG_MIN = 40.0
@@ -47,7 +54,7 @@ OPTIMUM_FL = 370
 LEVEL_PENALTY_PER_FL10_SQ = 0.002   # +0.2% fuel per (10 FL away from optimum)^2
 CANDIDATE_LEVELS = list(range(280, 411, 10))
 TERMINAL_ALT_M = 10_000 / METERS_TO_FEET
-TERMINAL_RADIUS_M = 60_000
+TERMINAL_RADIUS_M = 40 * 1852
 CRUISE_MIN_ALT_M = 25_000 / METERS_TO_FEET
 LEVEL_VRATE_MS = 2.5
 
@@ -134,6 +141,10 @@ def analyse_flight(f, route: Optional[Route], winds: WindField,
                    aircraft_type: Optional[str] = None) -> FlightMetrics:
     from .airports import airline_name  # local import keeps module load light
 
+    route_source = route.source if route else "unknown"
+    if route and route.source != "simulated" and route_mismatch(f.latitude, f.longitude, f.true_track_deg, route):
+        route, route_source = None, "mismatch"
+
     type_code = (aircraft_type or getattr(f, "aircraft_type", None) or "").strip().upper() or None
     perf, known = performance_for(type_code)
 
@@ -143,7 +154,7 @@ def analyse_flight(f, route: Optional[Route], winds: WindField,
         track_deg=f.true_track_deg, vrate_ms=f.vertical_rate_ms,
         origin=route.origin.iata or route.origin.code if route else None,
         destination=route.destination.iata or route.destination.code if route else None,
-        route_source=route.source if route else "unknown",
+        route_source=route_source,
         aircraft_type=type_code,
         fuel_basis="type" if known else "default",
         cruise_fuel_kg_min=perf.cruise_fuel_kg_min,

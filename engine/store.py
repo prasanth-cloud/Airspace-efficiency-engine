@@ -12,7 +12,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
-from .efficiency import FlightMetrics
+from .efficiency import SCORING_VERSION, FlightMetrics
 from .queueing import HubQueue
 
 SCHEMA = """
@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS runs (
     wind_valid    TEXT,
     n_flights     INTEGER NOT NULL,
     n_scored      INTEGER NOT NULL,
-    total_waste_co2_kg_min REAL NOT NULL
+    total_waste_co2_kg_min REAL NOT NULL,
+    scoring_version INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS flight_metrics (
     run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -56,7 +57,12 @@ CREATE TABLE IF NOT EXISTS hub_status (
 """
 
 # Columns added after the first release: (name, SQL type)
-MIGRATIONS = [("aircraft_type", "TEXT"), ("fuel_basis", "TEXT"), ("cruise_fuel_kg_min", "REAL")]
+MIGRATIONS = [
+    ("flight_metrics", "aircraft_type", "TEXT"),
+    ("flight_metrics", "fuel_basis", "TEXT"),
+    ("flight_metrics", "cruise_fuel_kg_min", "REAL"),
+    ("runs", "scoring_version", "INTEGER NOT NULL DEFAULT 1"),  # runs before versioning count as 1
+]
 
 METRIC_COLUMNS = [
     "icao24", "callsign", "airline", "lat", "lon", "alt_m", "gs_ms", "track_deg", "vrate_ms",
@@ -79,10 +85,10 @@ class Store:
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
         """Add columns introduced after a database was first created."""
-        existing = {r[1] for r in conn.execute("PRAGMA table_info(flight_metrics)")}
-        for column, sql_type in MIGRATIONS:
+        for table, column, sql_type in MIGRATIONS:
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
-                conn.execute(f"ALTER TABLE flight_metrics ADD COLUMN {column} {sql_type}")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
         conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -100,9 +106,9 @@ class Store:
         with closing(self._connect()) as conn, conn:
             cur = conn.execute(
                 "INSERT INTO runs (ts_utc, source, wind_source, wind_valid, n_flights, n_scored, "
-                "total_waste_co2_kg_min) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "total_waste_co2_kg_min, scoring_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (ts_utc, source, wind_source, wind_valid, len(metrics), len(scored),
-                 sum(m.waste_co2_kg_min or 0 for m in scored)),
+                 sum(m.waste_co2_kg_min or 0 for m in scored), SCORING_VERSION),
             )
             run_id = cur.lastrowid
             placeholders = ", ".join("?" * (len(METRIC_COLUMNS) + 2))
@@ -173,7 +179,7 @@ class Store:
                    SUM(fm.waste_co2_kg_min) AS sum_waste_kg_min,
                    AVG(CASE WHEN fm.rating = 'wasteful' THEN 1.0 ELSE 0.0 END) AS wasteful_share
             FROM flight_metrics fm JOIN runs r ON r.id = fm.run_id
-            WHERE fm.efficiency IS NOT NULL {source_filter}
+            WHERE fm.efficiency IS NOT NULL {source_filter} AND r.scoring_version = {SCORING_VERSION}
               AND r.ts_utc >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)
             GROUP BY fm.airline_code HAVING COUNT(*) >= ?
             ORDER BY mean_efficiency DESC

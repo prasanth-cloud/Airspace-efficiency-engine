@@ -24,7 +24,8 @@ All six phases have been tested offline with simulated and stubbed data (16 unit
 - **`Flight` dataclass** (Phase 1) feeds `FlightMetrics` (Phase 3). Add fields; never rename existing ones.
 - **Units inside the engine** are SI: metres, m/s, and degrees true. Feet and knots are display-only.
 - **Source flags.** Every run is tagged `LIVE`/`MOCK` for traffic and `GFS`/`SIMULATED` for winds. The scoreboard counts LIVE runs only.
-- **Route source** is `adsbdb`, `simulated` or `unknown`. An unknown route gets no lateral score.
+- **Route source** is `adsbdb`, `simulated`, `unknown` or `mismatch` (a looked-up route the aircraft is not flying). Only `adsbdb` and `simulated` routes get a lateral score.
+- **Scoring version.** Each run records `scoring_version` (`engine/efficiency.py`). The scoreboard and validation only use runs from the current version. Bump it whenever stored scores stop being comparable.
 - **SQLite** (`data/engine.sqlite3`) is the hand-off between the poller and the API. It runs in WAL mode so both can work at the same time.
 
 ## Layout
@@ -67,3 +68,4 @@ data/                  Caches, SQLite DB, logs (git-ignored)
 - **2026-10-03:** Phase 1 for the East Coast box. Added a dark satellite basemap, plane icons that rotate to each aircraft's true track, simulated hub-to-hub fallback traffic, and strict geofence filtering.
 - **2026-10-03:** Built Phases 2 to 6. Added the engine package, CLI, tests and README. Simulated traffic now includes doglegs and hub arrival banks.
 - **2026-10-03:** Added aircraft type lookup with per-type fuel flow (`engine/aircraft.py`) and model validation (`engine/validation.py`, `--validate`). After validation, the 787-9 and 787-10 fuel flows were lowered to match the published figures.
+- **2026-10-03:** First live run showed 51.5% route inefficiency against the 2.86% FAA benchmark, with 9% lookup coverage. There were two causes. Stale callsign routes were scored as if the aircraft were flying them, and per-run lookup caps (150 routes, 200 types) limited coverage. The fix rejects implausible routes, uses a 40 NM terminal radius, adds OpenSky's bulk aircraft database, raises the caps to 600 with a rate-limit breaker, and versions scores so the old run is ignored.

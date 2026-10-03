@@ -24,6 +24,16 @@ from engine.winds import WindField, simulated_field  # noqa: E402
 BBOX = ft.BOUNDING_BOX
 
 
+def _v1_schema() -> str:
+    """The database schema as first released, before later column migrations."""
+    from engine.store import SCHEMA
+    return (SCHEMA.replace("aircraft_type TEXT, fuel_basis TEXT, cruise_fuel_kg_min REAL,", "")
+                  .replace(",\n    scoring_version INTEGER NOT NULL DEFAULT 1", ""))
+
+
+V1_SCHEMA = _v1_schema()
+
+
 def uniform_field(u: float, v: float) -> WindField:
     alts = [0.0, 6000.0, 13000.0]
     grid = lambda val: [[[val, val], [val, val]] for _ in alts]
@@ -226,19 +236,18 @@ class AircraftTypeTests(unittest.TestCase):
         for f, icao in zip(flights, ["a1", "a2", "a3", "a4"]):
             f.icao24 = icao
         with tempfile.TemporaryDirectory() as tmp, mock.patch("requests.Session.get", fake_get):
-            resolver = AircraftResolver(Path(tmp))
+            resolver = AircraftResolver(Path(tmp), type_index={})
             self.assertEqual(resolver.resolve_many(flights), {"a1": "A21N", "a2": "E75L", "a3": None, "a4": None})
             self.assertIn("a3", resolver.cache)        # unknown everywhere: negative-cached
             self.assertNotIn("a4", resolver.cache)     # transient error: retried next run
-            self.assertEqual(AircraftResolver(Path(tmp)).cache["a1"]["type"], "A21N")
+            self.assertEqual(AircraftResolver(Path(tmp), type_index={}).cache["a1"]["type"], "A21N")
 
     def test_store_migrates_old_database(self):
         import sqlite3
         from engine.store import Store
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "old.sqlite3"
-            from engine.store import SCHEMA
-            v1_schema = SCHEMA.replace("aircraft_type TEXT, fuel_basis TEXT, cruise_fuel_kg_min REAL,", "")
+            v1_schema = V1_SCHEMA
             conn = sqlite3.connect(db)
             conn.executescript(v1_schema)
             conn.close()
@@ -247,6 +256,10 @@ class AircraftTypeTests(unittest.TestCase):
             cols = {r[1] for r in conn.execute("PRAGMA table_info(flight_metrics)")}
             conn.close()
             self.assertTrue({"aircraft_type", "fuel_basis", "cruise_fuel_kg_min"} <= cols)
+            conn = sqlite3.connect(db)
+            run_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+            conn.close()
+            self.assertIn("scoring_version", run_cols)
 
 
 class ValidationTests(unittest.TestCase):
@@ -259,14 +272,36 @@ class ValidationTests(unittest.TestCase):
 
     def test_live_check_migrates_old_database(self):
         import sqlite3
-        from engine.store import SCHEMA
         from engine.validation import check_live_data
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "old.sqlite3"
             conn = sqlite3.connect(db)
-            conn.executescript(SCHEMA.replace("aircraft_type TEXT, fuel_basis TEXT, cruise_fuel_kg_min REAL,", ""))
+            conn.executescript(V1_SCHEMA)
             conn.close()
             self.assertEqual(check_live_data(db).runs, 0)
+
+    def test_live_check_ignores_runs_from_older_scoring(self):
+        import sqlite3
+        from engine.store import Store
+        from engine.validation import check_live_data
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "engine.sqlite3"
+            store = Store(db)
+            route = _route_from_text("ATL to JFK")
+            pos = geo.great_circle_point(33.6407, -84.4277, 40.6413, -73.7781, 0.5)
+            course = geo.initial_bearing(*pos, 40.6413, -73.7781)
+            good = analyse_flight(make_flight(*pos, course + 10), route, uniform_field(0, 0))
+            store.save_run("2026-10-03T15:00:00Z", "LIVE", "GFS", "", [good], [])
+            conn = sqlite3.connect(db)  # a run scored under the old rules, all wrong routes
+            conn.execute("INSERT INTO runs (ts_utc, source, wind_source, n_flights, n_scored, "
+                         "total_waste_co2_kg_min, scoring_version) VALUES ('2026-10-03T14:00:00Z', 'LIVE', 'GFS', 1, 1, 0, 1)")
+            conn.execute("INSERT INTO flight_metrics (run_id, callsign, lateral_eff, route_source) "
+                         "VALUES (last_insert_rowid(), 'OLD1', 0.0, 'adsbdb')")
+            conn.commit()
+            conn.close()
+            live = check_live_data(db)
+            self.assertEqual(live.runs, 1)
+            self.assertAlmostEqual(live.mean_route_extension, 1 - math.cos(math.radians(10)), places=6)
 
     def test_report_without_live_data(self):
         from engine.validation import run_validation
@@ -275,6 +310,79 @@ class ValidationTests(unittest.TestCase):
             self.assertTrue(passed)
             self.assertIn("No LIVE runs recorded yet", report)
             self.assertTrue((Path(tmp) / "report.md").exists())
+
+
+class RouteMismatchTests(unittest.TestCase):
+    """Stale callsign routes must not be scored as wasted fuel."""
+
+    def setUp(self):
+        from engine.routes import Endpoint, Route
+        self.route = Route(Endpoint("KATL", "ATL", "Atlanta", 33.6407, -84.4277),
+                           Endpoint("KBOS", "BOS", "Boston", 42.3656, -71.0096), "adsbdb")
+        self.mid = geo.great_circle_point(33.6407, -84.4277, 42.3656, -71.0096, 0.5)
+        self.course = geo.initial_bearing(*self.mid, 42.3656, -71.0096)
+
+    def test_on_route_with_detour_is_plausible(self):
+        from engine.routes import route_mismatch
+        self.assertIsNone(route_mismatch(*self.mid, self.course + 35, self.route))
+        offset = geo.great_circle_point(*self.mid, 40.0, -72.0, 0.15)  # pushed some way off the line
+        self.assertIsNone(route_mismatch(*offset, self.course, self.route))
+
+    def test_reverse_direction_is_rejected(self):
+        from engine.routes import route_mismatch
+        self.assertIn("heading", route_mismatch(*self.mid, (self.course + 180) % 360, self.route))
+
+    def test_far_off_route_or_beyond_ends_is_rejected(self):
+        from engine.routes import route_mismatch
+        self.assertIn("off the route", route_mismatch(27.0, -80.0, 45.0, self.route))  # over Florida
+        self.assertIn("beyond", route_mismatch(30.0, -88.5, 45.0, self.route))       # behind Atlanta
+
+    def test_mismatched_route_is_not_scored_laterally(self):
+        f = make_flight(*self.mid, (self.course + 180) % 360)
+        m = analyse_flight(f, self.route, uniform_field(0, 0))
+        self.assertEqual(m.route_source, "mismatch")
+        self.assertIsNone(m.lateral_eff)
+        self.assertIsNone(m.destination)
+
+    def test_terminal_radius_is_40nm(self):
+        from engine.efficiency import TERMINAL_RADIUS_M
+        self.assertAlmostEqual(TERMINAL_RADIUS_M, 74_080)
+
+
+class BulkAircraftDatabaseTests(unittest.TestCase):
+    def test_index_built_from_opensky_csv_and_used_first(self):
+        from engine import aircraft
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / aircraft.AIRCRAFT_DB_CSV).write_text(
+                "'icao24','registration','manufacturericao','typecode','model'\n"
+                "'a1b2c3','N123','BOEING','B738','737-823'\n"
+                "'abcdef','N9','AIRBUS','',''\n"
+                "'4ca123','EI-ABC','AIRBUS','A20N','A320-251N'\n", encoding="utf-8")
+            index = aircraft.ensure_type_index(d, offline=True)
+            self.assertEqual(index, {"a1b2c3": "B738", "4ca123": "A20N"})
+            flights = [make_flight(30, -80, 0), make_flight(30, -80, 0)]
+            flights[0].icao24, flights[1].icao24 = "A1B2C3", "abcdef"
+            resolver = aircraft.AircraftResolver(d, offline=True, type_index=index)
+            self.assertEqual(resolver.resolve_many(flights), {"A1B2C3": "B738", "abcdef": None})
+
+    def test_rate_limit_stops_further_lookups(self):
+        from unittest import mock
+        from engine.aircraft import AircraftResolver
+        calls = []
+
+        def fake_get(self_, url, timeout=None):
+            calls.append(url)
+            r = mock.Mock(status_code=429)
+            return r
+
+        flights = [make_flight(30, -80, 0) for _ in range(40)]
+        for i, f in enumerate(flights):
+            f.icao24 = f"a{i:05d}"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("requests.Session.get", fake_get):
+            result = AircraftResolver(Path(tmp), type_index={}).resolve_many(flights)
+        self.assertTrue(all(v is None for v in result.values()))
+        self.assertLess(len(calls), 40)  # the breaker stopped the batch early
 
 
 if __name__ == "__main__":
