@@ -5,6 +5,7 @@ Global Predictive Airspace Efficiency Engine - command line entry point
     py run_engine.py                 one full cycle: map, scoreboard, advisories
     py run_engine.py --loop          Phase 4 background engine, every 5 minutes
     py run_engine.py --api           Phase 6 dispatch API on http://127.0.0.1:8000/docs
+    py run_engine.py --validate      check the carbon model against published figures
     py run_engine.py --mock          use simulated traffic (no OpenSky call)
     py run_engine.py --offline       simulated traffic, winds and routes (no network)
 
@@ -73,6 +74,7 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--loop", action="store_true", help="run continuously (Phase 4)")
     mode.add_argument("--api", action="store_true", help="serve the dispatch API (Phase 6)")
+    mode.add_argument("--validate", action="store_true", help="validate the carbon model and write data/validation_report.md")
     parser.add_argument("--interval", type=int, default=300, help="seconds between cycles with --loop (default 300)")
     parser.add_argument("--mock", action="store_true", help="simulated traffic instead of OpenSky")
     parser.add_argument("--offline", action="store_true", help="no network at all: simulated traffic, winds and routes")
@@ -86,6 +88,12 @@ def main() -> int:
                        offline_winds=args.offline, offline_routes=args.offline, airlines_only=not args.all)
     setup_logging(cfg.data_dir)
 
+    if args.validate:
+        from engine.validation import run_validation
+        passed, report = run_validation(cfg.db_path, cfg.data_dir / "validation_report.md")
+        print(report)
+        log.info("Validation report written to %s", cfg.data_dir / "validation_report.md")
+        return 0 if passed else 1
     if args.api:
         import uvicorn
         from engine.api import create_app

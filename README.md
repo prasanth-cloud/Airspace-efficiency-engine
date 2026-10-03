@@ -25,6 +25,7 @@ py run_engine.py                 # one cycle: map, scoreboard, arrival advisorie
 py run_engine.py --loop          # background engine, every 5 minutes (Ctrl+C to stop)
 py run_engine.py --api           # dispatch API, docs at http://127.0.0.1:8000/docs
 py run_engine.py --offline       # demo with no network: simulated traffic, winds and routes
+py run_engine.py --validate      # check the carbon model against published fuel and route figures
 py flight_tracker.py             # Phase 1 live map only
 py -m unittest discover tests -v # test suite
 ```
@@ -49,9 +50,12 @@ py -m unittest discover tests -v # test suite
 
 Origin and destination for live flights come from adsbdb.com and are cached for a day. Flights with no known route are not scored laterally.
 
+Aircraft types come from adsbdb.com, with OpenSky aircraft metadata as a backup, and are cached for 30 days. `engine/aircraft.py` holds cruise fuel flows for about 50 common types.
+
 ## Assumptions to keep in mind
 
-- **Fuel model.** Aircraft type is not in the public feed, so every aircraft uses a single-aisle reference of 40 kg fuel per minute in cruise. Each kg of fuel produces 3.16 kg of CO2.
+- **Fuel model.** Cruise fuel flow depends on the aircraft type and is adjusted for climb, descent and flight level. Aircraft whose type can't be found use a single-aisle reference of 40 kg per minute. Each kg of fuel produces 3.16 kg of CO2.
+- **Validation.** `--validate` compares the fuel model with 11 published trip-fuel figures (Aircraft Commerce No. 121 and No. 137) and compares live route inefficiency with the FAA/EUROCONTROL US benchmark of 2.86%. The report is written to `data/validation_report.md`.
 - **Hub capacity.** Arrival rates are approximate good-weather planning values, set in `engine/airports.py`.
 - **Not operational.** Advisories and flight plans are decision support. They are not ATC clearances or filed flight plans.
 
