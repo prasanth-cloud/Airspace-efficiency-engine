@@ -42,6 +42,8 @@ engine/store.py        Phase 4 storage
 engine/dashboard.py    Phase 4 scoreboard
 engine/mapview.py      Combined map
 engine/flightplan.py   Phase 6 FPL strings
+engine/aircraft.py     Aircraft type lookup and per-type fuel flow
+engine/validation.py   Carbon model validation against published figures
 engine/api.py          Phase 6 API
 tests/test_engine.py   py -m unittest discover tests -v
 data/                  Caches, SQLite DB, logs (git-ignored)
@@ -49,8 +51,7 @@ data/                  Caches, SQLite DB, logs (git-ignored)
 
 ## Next refinements
 
-- Run against live services on the owner's machine and check the numbers.
-- Replace the single-aisle fuel model with per-type fuel flow (for example from an aircraft database keyed by icao24).
+- Run against live services on the owner's machine, then run `py run_engine.py --validate` to check live route inefficiency against the FAA benchmark.
 - Widen the queueing view beyond the geofence so traffic from farther out is counted.
 - Calibrate hub arrival rates against FAA ASPM data.
 
@@ -65,3 +66,4 @@ data/                  Caches, SQLite DB, logs (git-ignored)
 - **2026-10-03:** First London-box script.
 - **2026-10-03:** Phase 1 for the East Coast box. Added a dark satellite basemap, plane icons that rotate to each aircraft's true track, simulated hub-to-hub fallback traffic, and strict geofence filtering.
 - **2026-10-03:** Built Phases 2 to 6. Added the engine package, CLI, tests and README. Simulated traffic now includes doglegs and hub arrival banks.
+- **2026-10-03:** Added aircraft type lookup with per-type fuel flow (`engine/aircraft.py`) and model validation (`engine/validation.py`, `--validate`). After validation, the 787-9 and 787-10 fuel flows were lowered to match the published figures.

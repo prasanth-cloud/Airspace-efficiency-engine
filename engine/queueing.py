@@ -7,9 +7,10 @@ runs a first-come-first-served runway slot model at the hub's arrival rate.
 When demand outruns capacity, each aircraft's required delay is absorbed as far
 as possible by slowing down at cruise while still far out (up to 7% of airspeed
 when more than 150 NM from the hub), and only the remainder is left to
-low-altitude holding. Holding at around FL100 burns roughly 45 kg of fuel per
-minute in a single-aisle jet, while slowing in cruise costs almost nothing
-extra, which is where the CO2 saving comes from.
+low-altitude holding. Holding at around FL100 burns roughly 1.1 times the
+aircraft type's cruise fuel flow (about 45 kg/min for a single aisle), while
+slowing in cruise costs almost nothing extra, which is where the CO2 saving
+comes from.
 
 Limitation: only aircraft inside the geofence are visible, so traffic still
 outside it within the 3-hour horizon is not yet counted.
@@ -21,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from .airports import AIRPORTS, PRIORITY_HUBS
-from .efficiency import CO2_PER_KG_FUEL, CRUISE_FUEL_KG_MIN, FlightMetrics
+from .efficiency import CO2_PER_KG_FUEL, FlightMetrics
 from .geo import MS_TO_KNOTS, M_TO_NM, speed_of_sound_ms
 
 HORIZON_S = 3 * 3600
@@ -29,7 +30,7 @@ BIN_S = 15 * 60
 MAX_SPEED_REDUCTION = 0.07
 MIN_ABSORB_DISTANCE_NM = 150
 MIN_ADVISORY_DELAY_MIN = 1.0
-HOLDING_FUEL_KG_MIN = 45.0
+HOLDING_FUEL_RATIO = 1.125              # holding burn relative to cruise fuel flow
 SPEED_CONTROL_EXTRA_FRACTION = 0.15  # net extra burn per minute of added cruise time
 APPROACH_SPEED_FACTOR = 0.85         # aircraft slow down on approach
 
@@ -117,7 +118,8 @@ def plan_arrivals(metrics: list[FlightMetrics], now: datetime | None = None,
             mach = None
             if m.alt_m and m.alt_m > 7_000:
                 mach = round(advised_tas / speed_of_sound_ms(m.alt_m), 2)
-            saved = absorbed * (HOLDING_FUEL_KG_MIN - SPEED_CONTROL_EXTRA_FRACTION * CRUISE_FUEL_KG_MIN) * CO2_PER_KG_FUEL
+            cruise_ff = m.cruise_fuel_kg_min
+            saved = absorbed * cruise_ff * (HOLDING_FUEL_RATIO - SPEED_CONTROL_EXTRA_FRACTION) * CO2_PER_KG_FUEL
 
             q.advisories.append(Advisory(
                 hub=hub, callsign=m.callsign,

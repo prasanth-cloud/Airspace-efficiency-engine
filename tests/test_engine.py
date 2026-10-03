@@ -178,5 +178,104 @@ class PipelineAndApiTests(unittest.TestCase):
                 os.environ.pop("ENGINE_API_KEYS", None)
 
 
+class AircraftTypeTests(unittest.TestCase):
+    def setUp(self):
+        self.route = _route_from_text("ATL to JFK")
+        self.start = geo.great_circle_point(33.6407, -84.4277, 40.6413, -73.7781, 0.5)
+        self.course = geo.initial_bearing(*self.start, 40.6413, -73.7781)
+
+    def test_widebody_burns_more_than_default(self):
+        f = make_flight(*self.start, self.course + 20)
+        default = analyse_flight(f, self.route, uniform_field(0, 0))
+        wide = analyse_flight(f, self.route, uniform_field(0, 0), aircraft_type="B77W")
+        self.assertEqual(default.fuel_basis, "default")
+        self.assertEqual(wide.fuel_basis, "type")
+        self.assertAlmostEqual(wide.co2_kg_min / default.co2_kg_min, 7500 / 2400, places=6)
+        self.assertAlmostEqual(wide.efficiency, default.efficiency, places=9)
+
+    def test_unknown_type_keeps_code_but_uses_default_fuel(self):
+        m = analyse_flight(make_flight(*self.start, self.course), self.route, uniform_field(0, 0), aircraft_type="b712")
+        self.assertEqual(m.aircraft_type, "B712")
+        self.assertEqual(m.fuel_basis, "default")
+
+    def test_flight_plan_uses_type_and_wake(self):
+        row = {"callsign": "UAL1", "origin": "EWR", "destination": "BOS", "orig_lat": 40.6895, "orig_lon": -74.1745,
+               "dest_lat": 42.3656, "dest_lon": -71.0096, "lat": 41.0, "lon": -73.0, "aircraft_type": "B789"}
+        fpl = build_flight_plan(row)
+        self.assertIn("\n-B789/H-", fpl)
+        self.assertNotIn("TYP/", fpl)
+        row["aircraft_type"] = "B712"
+        self.assertIn("TYP/B712", build_flight_plan(row))
+
+    def test_resolver_sources_and_cache(self):
+        from unittest import mock
+        from engine.aircraft import AircraftResolver
+
+        def fake_get(self_, url, timeout=None):
+            r = mock.Mock()
+            icao = url.rsplit("/", 1)[1]
+            if "adsbdb" in url:
+                r.status_code = 200 if icao == "a1" else 404
+                r.json.return_value = {"response": {"aircraft": {"icao_type": "A21N"}}}
+            else:
+                r.status_code = 200 if icao == "a2" else (503 if icao == "a4" else 404)
+                r.json.return_value = {"typecode": "E75L"}
+            return r
+
+        flights = [make_flight(30, -80, 0, callsign=f"X{i}") for i in range(4)]
+        for f, icao in zip(flights, ["a1", "a2", "a3", "a4"]):
+            f.icao24 = icao
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("requests.Session.get", fake_get):
+            resolver = AircraftResolver(Path(tmp))
+            self.assertEqual(resolver.resolve_many(flights), {"a1": "A21N", "a2": "E75L", "a3": None, "a4": None})
+            self.assertIn("a3", resolver.cache)        # unknown everywhere: negative-cached
+            self.assertNotIn("a4", resolver.cache)     # transient error: retried next run
+            self.assertEqual(AircraftResolver(Path(tmp)).cache["a1"]["type"], "A21N")
+
+    def test_store_migrates_old_database(self):
+        import sqlite3
+        from engine.store import Store
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "old.sqlite3"
+            from engine.store import SCHEMA
+            v1_schema = SCHEMA.replace("aircraft_type TEXT, fuel_basis TEXT, cruise_fuel_kg_min REAL,", "")
+            conn = sqlite3.connect(db)
+            conn.executescript(v1_schema)
+            conn.close()
+            Store(db)
+            conn = sqlite3.connect(db)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(flight_metrics)")}
+            conn.close()
+            self.assertTrue({"aircraft_type", "fuel_basis", "cruise_fuel_kg_min"} <= cols)
+
+
+class ValidationTests(unittest.TestCase):
+    def test_fuel_model_within_tolerance_of_published_trip_fuel(self):
+        from engine.validation import check_fuel_model
+        checks = check_fuel_model()
+        self.assertGreaterEqual(len(checks), 10)
+        failures = [f"{c.ref.icao_type} {c.error * 100:+.1f}%" for c in checks if not c.passed]
+        self.assertEqual(failures, [])
+
+    def test_live_check_migrates_old_database(self):
+        import sqlite3
+        from engine.store import SCHEMA
+        from engine.validation import check_live_data
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "old.sqlite3"
+            conn = sqlite3.connect(db)
+            conn.executescript(SCHEMA.replace("aircraft_type TEXT, fuel_basis TEXT, cruise_fuel_kg_min REAL,", ""))
+            conn.close()
+            self.assertEqual(check_live_data(db).runs, 0)
+
+    def test_report_without_live_data(self):
+        from engine.validation import run_validation
+        with tempfile.TemporaryDirectory() as tmp:
+            passed, report = run_validation(Path(tmp) / "none.sqlite3", Path(tmp) / "report.md")
+            self.assertTrue(passed)
+            self.assertIn("No LIVE runs recorded yet", report)
+            self.assertTrue((Path(tmp) / "report.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

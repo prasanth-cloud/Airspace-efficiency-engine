@@ -36,6 +36,8 @@ def _popup(m: FlightMetrics) -> str:
         f"{'Tailwind' if m.tailwind_ms >= 0 else 'Headwind'} {abs(m.tailwind_ms) * MS_TO_KNOTS:.0f} kt")
     rows = [
         row("Airline", html.escape(m.airline)), row("Route", html.escape(route)),
+        row("Aircraft", html.escape(m.aircraft_type or "unknown")
+            + ("" if m.fuel_basis == "type" else " (single-aisle fuel estimate)")),
         row("Phase", m.phase),
         row("Altitude", _fmt(m.alt_m and m.alt_m * METERS_TO_FEET, ",.0f", " ft")),
         row("Groundspeed", _fmt(m.gs_ms and m.gs_ms * MS_TO_KNOTS, ".0f", " kt")),

@@ -104,8 +104,8 @@ def build_scoreboard(store: Store, output: Path, days: int = 7) -> Path:
   <div class="foot">
     Efficiency is the share of fuel burn that turns into progress towards the destination, compared with
     flying the great circle through the same winds (lateral) at the best flight level (vertical). Winds come
-    from NOAA GFS. Aircraft types are not in the public feed, so every aircraft uses a single-aisle reference
-    fuel flow; compare airlines with similar fleets. Flights below 10,000 ft or within 60 km of an airport
+    from NOAA GFS. Fuel flow comes from each aircraft's type; aircraft whose type cannot be found use a
+    single-aisle reference. Flights below 10,000 ft or within 60 km of an airport
     are not scored. Airlines need at least 5 scored observations to be ranked.
   </div>
 </main></body></html>"""

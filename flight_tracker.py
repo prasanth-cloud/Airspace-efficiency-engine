@@ -100,6 +100,7 @@ class Flight:
     true_track_deg: Optional[float]
     vertical_rate_ms: Optional[float]
     route: Optional[str] = None  # only known for simulated traffic in Phase 1
+    aircraft_type: Optional[str] = None  # ICAO type designator, simulated traffic only
 
     @property
     def altitude_ft(self) -> Optional[int]:
@@ -260,17 +261,17 @@ HUBS = {
     "PIT": (40.4915, -80.2329),
 }
 
-# (ICAO operator code, hubs it mostly serves)
+# (ICAO operator code, hubs it mostly serves, typical aircraft types)
 US_OPERATORS = [
-    ("AAL", ["CLT", "MIA", "PHL", "DCA", "JFK", "LGA", "BOS"]),
-    ("DAL", ["ATL", "JFK", "LGA", "BOS", "MCO", "TPA", "RDU"]),
-    ("UAL", ["EWR", "IAD", "BOS", "MCO", "FLL"]),
-    ("JBU", ["JFK", "BOS", "FLL", "MCO", "TPA"]),
-    ("SWA", ["BWI", "ATL", "MCO", "TPA", "FLL", "PIT"]),
-    ("NKS", ["FLL", "MCO", "ATL", "EWR", "LGA"]),
-    ("RPA", ["LGA", "DCA", "PHL", "BOS", "IAD"]),
-    ("EDV", ["JFK", "LGA", "ATL", "RDU", "BOS"]),
-    ("FFT", ["MCO", "PHL", "TPA", "ATL"]),
+    ("AAL", ["CLT", "MIA", "PHL", "DCA", "JFK", "LGA", "BOS"], ["A321", "B738", "A319", "B38M", "B772"]),
+    ("DAL", ["ATL", "JFK", "LGA", "BOS", "MCO", "TPA", "RDU"], ["A321", "B739", "A20N", "B752", "A339"]),
+    ("UAL", ["EWR", "IAD", "BOS", "MCO", "FLL"], ["B739", "B38M", "A320", "B772", "B789"]),
+    ("JBU", ["JFK", "BOS", "FLL", "MCO", "TPA"], ["A320", "A321", "A21N", "BCS3"]),
+    ("SWA", ["BWI", "ATL", "MCO", "TPA", "FLL", "PIT"], ["B737", "B738", "B38M"]),
+    ("NKS", ["FLL", "MCO", "ATL", "EWR", "LGA"], ["A320", "A20N", "A21N"]),
+    ("RPA", ["LGA", "DCA", "PHL", "BOS", "IAD"], ["E75L", "E170"]),
+    ("EDV", ["JFK", "LGA", "ATL", "RDU", "BOS"], ["CRJ9", "CRJ7"]),
+    ("FFT", ["MCO", "PHL", "TPA", "ATL"], ["A20N", "A21N"]),
 ]
 
 
@@ -313,7 +314,7 @@ def generate_mock_flights(bbox: dict, count: int = 250, seed: Optional[int] = No
     rng = random.Random(seed)
     flights: list[Flight] = []
     while len(flights) < count:
-        code, hubs = rng.choice(US_OPERATORS)
+        code, hubs, types = rng.choice(US_OPERATORS)
         origin, dest = rng.sample(hubs, 2)
         frac = rng.uniform(0.04, 0.96)
         if rng.random() < ARRIVAL_BANK_SHARE:
@@ -359,6 +360,7 @@ def generate_mock_flights(bbox: dict, count: int = 250, seed: Optional[int] = No
                 true_track_deg=track,
                 vertical_rate_ms=vrate,
                 route=f"{origin} to {dest}",
+                aircraft_type=rng.choice(types),
             )
         )
     return flights
