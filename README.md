@@ -50,6 +50,8 @@ py -m unittest discover tests -v # test suite
 
 Origin and destination for live flights come from adsbdb.com and are cached for a day. Callsign route data goes stale, so a route is discarded when the aircraft is plainly not flying it. That covers an aircraft far off the route line, beyond either end of it, or outside the terminal area and heading away from the destination. Flights with no usable route are not scored laterally.
 
+With OpenSky API client credentials set (`OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`), the engine also reads OpenSky's flight history for the last two days. It learns which airport pairs each callsign actually flew and where each aircraft last landed. A history route the aircraft is plausibly flying replaces the adsbdb route and is tagged `opensky`. The history is filled in a few two-hour windows per cycle, so it takes about six cycles (30 minutes) to cover two days. OpenSky publishes flights in batches, so the newest hours are retried until they appear. Airport coordinates come from the OurAirports public-domain list, downloaded into `data/` on first use. Without credentials this step is skipped.
+
 Aircraft types come first from OpenSky's bulk aircraft database. The engine downloads it into `data/` on the first run and refreshes it monthly. If the download fails, you can download `aircraftDatabase.csv` from OpenSky yourself and put it in `data/`. Anything missing from it is looked up on adsbdb.com, with OpenSky metadata as a backup, and cached for 30 days. `engine/aircraft.py` holds cruise fuel flows for about 50 common types.
 
 ## Assumptions to keep in mind

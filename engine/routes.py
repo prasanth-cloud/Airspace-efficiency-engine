@@ -10,6 +10,12 @@ Callsign route databases go stale: flight numbers get reassigned, run in both
 directions, or cover several legs. ``route_mismatch`` rejects a looked-up
 route when the aircraft is plainly not flying it, so a wrong destination is
 never scored as wasted fuel.
+
+With OpenSky API credentials, ``history.FlightHistory`` adds the airport pairs
+each callsign actually flew recently. A history pair the aircraft is plausibly
+flying (preferring one that starts where the aircraft last landed) is used as an
+``opensky`` route; otherwise the adsbdb route stands, still subject to the
+mismatch test.
 """
 
 from __future__ import annotations
@@ -22,12 +28,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import requests
 
 from .airports import lookup
 from .geo import EARTH_RADIUS_M, angle_diff, cross_track_m, haversine_m, initial_bearing
+
+if TYPE_CHECKING:
+    from .history import FlightHistory
 
 log = logging.getLogger(__name__)
 
@@ -60,13 +69,14 @@ class Endpoint:
 class Route:
     origin: Endpoint
     destination: Endpoint
-    source: str  # "adsbdb" or "simulated"
+    source: str  # "opensky", "adsbdb" or "simulated"
 
 
 class RouteResolver:
-    def __init__(self, cache_dir: Path, offline: bool = False):
+    def __init__(self, cache_dir: Path, offline: bool = False, history: Optional["FlightHistory"] = None):
         self.cache_file = cache_dir / "route_cache.json"
         self.offline = offline
+        self.history = history
         self._rate_limited = threading.Event()
         self.cache: dict[str, dict] = {}
         try:
@@ -79,6 +89,19 @@ class RouteResolver:
 
     def resolve_many(self, flights: list) -> dict[str, Optional[Route]]:
         """Return {callsign: Route or None} for every flight."""
+        result = self._resolve_adsbdb(flights)
+        if self.history is not None:
+            confirmed = 0
+            for f in flights:
+                if f.route:
+                    continue
+                route = choose_route(f, result.get(f.callsign), self.history)
+                result[f.callsign] = route
+                confirmed += bool(route and route.source == "opensky")
+            log.info("OpenSky flight history confirmed routes for %d of %d flights.", confirmed, len(flights))
+        return result
+
+    def _resolve_adsbdb(self, flights: list) -> dict[str, Optional[Route]]:
         result: dict[str, Optional[Route]] = {}
         to_lookup: list[str] = []
         now = time.time()
@@ -149,6 +172,39 @@ class RouteResolver:
             self.cache_file.write_text(json.dumps(self.cache), encoding="utf-8")
         except OSError as exc:
             log.warning("Could not write route cache (%s).", exc)
+
+
+def choose_route(f, adsbdb_route: Optional[Route], history: "FlightHistory") -> Optional[Route]:
+    """Best route for a live flight from OpenSky history and adsbdb.
+
+    Candidates in order: history pairs that start where the aircraft last
+    landed; the adsbdb route when OpenSky also saw that pair or that departure;
+    other history pairs; finally the adsbdb route on its own. The first one the
+    aircraft is plausibly flying wins. When none fits, the adsbdb route is
+    returned unchanged so the efficiency step records it as a mismatch.
+    """
+    pairs = history.routes_for(f.callsign)
+    hint = history.departure_hint(f.icao24)
+    adsb_pair = (adsbdb_route.origin.code, adsbdb_route.destination.code) if adsbdb_route else None
+    candidates: list[Route] = []
+
+    def add_pair(dep: str, arr: str) -> None:
+        o, d = history.endpoint(dep), history.endpoint(arr)
+        if o and d:
+            candidates.append(Route(o, d, "opensky"))
+
+    for dep, arr in pairs:
+        if dep == hint:
+            add_pair(dep, arr)
+    if adsbdb_route and (adsb_pair in pairs or (hint and adsb_pair[0] == hint)):
+        candidates.append(Route(adsbdb_route.origin, adsbdb_route.destination, "opensky"))
+    for dep, arr in pairs:
+        if dep != hint:
+            add_pair(dep, arr)
+    for route in candidates:
+        if not route_mismatch(f.latitude, f.longitude, f.true_track_deg, route):
+            return route
+    return adsbdb_route
 
 
 def route_mismatch(lat: float, lon: float, track_deg: Optional[float], route: Route) -> Optional[str]:
