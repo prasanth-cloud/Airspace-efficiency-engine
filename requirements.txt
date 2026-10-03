@@ -1,0 +1,4 @@
+requests>=2.31
+folium>=0.17
+fastapi>=0.110
+uvicorn>=0.29
