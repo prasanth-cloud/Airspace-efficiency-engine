@@ -36,6 +36,7 @@ from typing import Optional
 from .aircraft import AircraftPerformance, performance_for
 from .efficiency import fuel_flow_kg_min
 from .geo import METERS_TO_FEET
+from .store import Store
 
 KG_PER_USG = 3.785411784 * 0.8  # Jet A at 0.8 kg/L
 FUEL_TOLERANCE = 0.15            # pass if within +/-15% of the published trip fuel
@@ -144,6 +145,7 @@ def check_live_data(db_path: Path) -> LiveCheck:
     """
     if not db_path.exists():
         return LiveCheck(0, 0, None, None, None)
+    Store(db_path)  # migrates databases created before the fuel_basis column existed
     with closing(sqlite3.connect(db_path)) as conn:
         runs = conn.execute("SELECT COUNT(*) FROM runs WHERE source = 'LIVE'").fetchone()[0]
         row = conn.execute("""

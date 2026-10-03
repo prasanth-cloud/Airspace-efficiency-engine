@@ -257,6 +257,17 @@ class ValidationTests(unittest.TestCase):
         failures = [f"{c.ref.icao_type} {c.error * 100:+.1f}%" for c in checks if not c.passed]
         self.assertEqual(failures, [])
 
+    def test_live_check_migrates_old_database(self):
+        import sqlite3
+        from engine.store import SCHEMA
+        from engine.validation import check_live_data
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "old.sqlite3"
+            conn = sqlite3.connect(db)
+            conn.executescript(SCHEMA.replace("aircraft_type TEXT, fuel_basis TEXT, cruise_fuel_kg_min REAL,", ""))
+            conn.close()
+            self.assertEqual(check_live_data(db).runs, 0)
+
     def test_report_without_live_data(self):
         from engine.validation import run_validation
         with tempfile.TemporaryDirectory() as tmp:
