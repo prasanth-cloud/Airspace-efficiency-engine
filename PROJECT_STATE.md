@@ -26,6 +26,7 @@ All six phases have been tested offline with simulated and stubbed data (16 unit
 - **Source flags.** Every run is tagged `LIVE`/`MOCK` for traffic and `GFS`/`SIMULATED` for winds. The scoreboard counts LIVE runs only.
 - **Route source** is `opensky` (an airport pair OpenSky flight history saw this callsign fly, consistent with the aircraft's position), `adsbdb`, `simulated`, `unknown` or `mismatch` (a looked-up route the aircraft is not flying). Only `opensky`, `adsbdb` and `simulated` routes get a lateral score.
 - **Scoring version.** Each run records `scoring_version` (`engine/efficiency.py`). The scoreboard and validation only use runs from the current version. Bump it whenever stored scores stop being comparable.
+- **Causes.** `causes.attribute` sets `waste_lateral_kg_min`, `waste_vertical_kg_min`, `lateral_cause` (congestion, weather, airspace or routing), `cause` (the larger of the lateral cause and `flight_level`) and the detail strings. Runs with attribution have `runs.cause_feeds` set; the route ranking (`Store.route_waste`) only uses those runs.
 - **SQLite** (`data/engine.sqlite3`) is the hand-off between the poller and the API. It runs in WAL mode so both can work at the same time.
 
 ## Layout
@@ -38,6 +39,7 @@ engine/airports.py     Hubs, arrival rates, airline names
 engine/winds.py        Phase 2
 engine/routes.py       Origin/destination lookup (adsbdb, cached) and route choice
 engine/history.py      OpenSky flight history and airport coordinates
+engine/causes.py       Cause attribution (FAA NAS Status, AWC SIGMETs, warning areas)
 engine/efficiency.py   Phase 3
 engine/queueing.py     Phase 5
 engine/store.py        Phase 4 storage
@@ -71,3 +73,4 @@ data/                  Caches, SQLite DB, logs (git-ignored)
 - **2026-10-03:** Added aircraft type lookup with per-type fuel flow (`engine/aircraft.py`) and model validation (`engine/validation.py`, `--validate`). After validation, the 787-9 and 787-10 fuel flows were lowered to match the published figures.
 - **2026-10-03:** First live run showed 51.5% route inefficiency against the 2.86% FAA benchmark, with 9% lookup coverage. There were two causes. Stale callsign routes were scored as if the aircraft were flying them, and per-run lookup caps (150 routes, 200 types) limited coverage. The fix rejects implausible routes, uses a 40 NM terminal radius, adds OpenSky's bulk aircraft database, raises the caps to 600 with a rate-limit breaker, and versions scores so the old run is ignored.
 - **2026-10-03:** After PR #3, only about 19% of live observations had a trustworthy route. Added OpenSky flight history (`engine/history.py`). With API credentials, the engine learns the airport pairs each callsign flew in the last two days and where each aircraft last landed, and uses a pair the aircraft is plausibly flying as an `opensky` route. In a stubbed replay with 75% stale adsbdb routes and 80% history coverage, trustworthy routes rose from 34% to 89%. `--validate` now reports the OpenSky-confirmed share.
+- **2026-10-03:** The owner chose public transparency as the goal. Added cause attribution (`engine/causes.py`). Excess CO2 is split into lateral and flight-level parts, and the lateral part is attributed to airport congestion (FAA NAS Status or the engine queue, within 250 NM), weather (convective SIGMETs within 50 km of the direct path), military or restricted airspace (approximate warning-area boxes, schedules not checked) or ATC routing / unexplained. The scoreboard now ranks routes by estimated t CO2 per week with a cause breakdown, and `GET /v1/routes` serves the same data. The FAA and AWC feed formats were coded from their documentation; the build sandbox cannot reach either host, so check the first live log line "evidence from ...".

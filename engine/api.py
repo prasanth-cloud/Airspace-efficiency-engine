@@ -118,4 +118,11 @@ def create_app(db_path: Path) -> FastAPI:
         return {"days": days, "include_simulated": include_simulated,
                 "airlines": store.scoreboard(days=days, include_simulated=include_simulated)}
 
+    @app.get("/v1/routes", dependencies=auth)
+    def routes(days: int = Query(7, ge=1, le=90), include_simulated: bool = False,
+               limit: int = Query(25, ge=1, le=200)) -> dict:
+        """Routes ranked by estimated weekly excess CO2, with the share from each cause."""
+        return {"days": days, "include_simulated": include_simulated,
+                **store.route_waste(days=days, include_simulated=include_simulated, limit=limit)}
+
     return app

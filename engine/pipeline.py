@@ -12,6 +12,7 @@ from pathlib import Path
 
 import flight_tracker as ft
 from .aircraft import AircraftResolver
+from .causes import attribute, load_context
 from .dashboard import build_scoreboard
 from .efficiency import FlightMetrics, analyse_flight
 from .mapview import build_engine_map
@@ -89,9 +90,21 @@ def run_once(cfg: EngineConfig, store: Store | None = None) -> RunResult:
             log.info("%s over capacity: %d inbound, %d advisories, %.0f kg CO2 saved by speed control.",
                      q.hub, q.inbound, len(q.advisories), q.total_co2_saved_kg)
 
+    # Why the waste happens: congestion, weather, airspace, routing, flight level
+    context = load_context(cfg.data_dir, offline=offline_lookups, queues=queues)
+    for m in metrics:
+        attribute(m, context)
+    by_cause: dict[str, float] = {}
+    for m in metrics:
+        if m.cause:
+            by_cause[m.cause] = by_cause.get(m.cause, 0.0) + (m.waste_co2_kg_min or 0)
+    log.info("Waste by main cause (kg CO2/min): %s; evidence from %s.",
+             ", ".join(f"{c} {v:.0f}" for c, v in sorted(by_cause.items(), key=lambda kv: -kv[1])) or "none",
+             ", ".join(context.feeds) or "no feeds")
+
     # Phase 4: persist and publish
     run_id = store.save_run(now.strftime("%Y-%m-%dT%H:%M:%SZ"), source, winds.source, winds.valid_time,
-                            metrics, queues)
+                            metrics, queues, cause_feeds=context.feeds)
     map_path = build_engine_map(metrics, winds, queues, cfg.bbox, source, cfg.output_dir / "index.html")
     scoreboard_path = build_scoreboard(store, cfg.output_dir / "scoreboard.html")
     (cfg.data_dir / "arrival_advisories_latest.json").write_text(

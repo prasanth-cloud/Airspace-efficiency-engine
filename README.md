@@ -54,6 +54,17 @@ With OpenSky API client credentials set (`OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT
 
 Aircraft types come first from OpenSky's bulk aircraft database. The engine downloads it into `data/` on the first run and refreshes it monthly. If the download fails, you can download `aircraftDatabase.csv` from OpenSky yourself and put it in `data/`. Anything missing from it is looked up on adsbdb.com, with OpenSky metadata as a backup, and cached for 30 days. `engine/aircraft.py` holds cruise fuel flows for about 50 common types.
 
+## Why routes waste fuel
+
+Each scored flight's excess CO2 is split into a lateral part (not flying the wind-aware great circle) and a vertical part (not at the best flight level). `engine/causes.py` puts the lateral part down to the first cause the evidence supports:
+
+1. **Airport congestion.** The destination has an FAA ground delay program, ground stop or arrival delay ([FAA NAS Status](https://nasstatus.faa.gov)), or the engine's own arrival queue delays the flight by 5 minutes or more. Only applies within 250 NM of the destination.
+2. **Weather.** A convective SIGMET from the NOAA Aviation Weather Center covers the aircraft or lies within 50 km of its direct path to the destination.
+3. **Military or restricted airspace.** The direct path crosses a major offshore warning area or launch area. Boundaries are approximate and activation schedules are not checked.
+4. **ATC routing or unexplained.** None of the above.
+
+The vertical part is shown as **non-optimal flight level**. The scoreboard ranks routes by estimated tonnes of excess CO2 per week inside the geofence, with a bar showing the share from each cause. The same data is available from `GET /v1/routes`. Both feeds are cached for 10 minutes; if one is unreachable, its cause is simply not assigned. Causes are recorded from this version on, so older runs are not part of the route ranking.
+
 ## Assumptions to keep in mind
 
 - **Fuel model.** Cruise fuel flow depends on the aircraft type and is adjusted for climb, descent and flight level. Aircraft whose type can't be found use a single-aisle reference of 40 kg per minute. Each kg of fuel produces 3.16 kg of CO2.

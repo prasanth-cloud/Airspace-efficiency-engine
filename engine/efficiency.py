@@ -101,6 +101,12 @@ class FlightMetrics:
     waste_co2_kg_min: Optional[float] = None
     phase: str = "unknown"                   # cruise, climb, descent, terminal
     rating: str = "unscored"                 # efficient, moderate, wasteful, unscored
+    waste_lateral_kg_min: Optional[float] = None   # excess CO2 from not flying the great circle
+    waste_vertical_kg_min: Optional[float] = None  # excess CO2 from not flying the best level
+    lateral_cause: Optional[str] = None      # causes.CAUSES; set by causes.attribute
+    lateral_cause_detail: Optional[str] = None
+    cause: Optional[str] = None              # the cause behind the larger share of the waste
+    cause_detail: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)

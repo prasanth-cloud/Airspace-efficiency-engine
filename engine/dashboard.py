@@ -11,7 +11,11 @@ import html
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .causes import CAUSE_LABELS, CAUSES
 from .store import Store
+
+CAUSE_COLOURS = {"congestion": "#ff4d6d", "weather": "#4cc9f0", "airspace": "#b388ff",
+                 "routing": "#ffb703", "flight_level": "#8a99a6"}
 
 CSS = """
 :root { --bg:#0b0f14; --panel:#131a22; --line:#243040; --text:#e8eef2; --muted:#8a99a6;
@@ -32,6 +36,11 @@ th { color:var(--muted); font-weight:600; background:#0f151c; } td:nth-child(2),
 tr:last-child td { border-bottom:none; }
 .bar { display:inline-block; height:8px; border-radius:4px; vertical-align:middle; margin-right:6px; }
 .pill { padding:1px 8px; border-radius:10px; font-weight:600; font-size:12px; color:#0b0f14; }
+.stack { display:inline-flex; width:180px; height:10px; border-radius:5px; overflow:hidden; vertical-align:middle; background:var(--line); }
+.stack span { display:block; height:100%; }
+.legend span { display:inline-block; margin-right:14px; font-size:12px; color:var(--muted); }
+.legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+td.l { text-align:left; }
 .foot { color:var(--muted); font-size:12px; margin-top:28px; line-height:1.6; }
 """
 
@@ -70,6 +79,35 @@ def build_scoreboard(store: Store, output: Path, days: int = 7) -> Path:
           <td>{max(map(int, h['demand_bins'].split(','))) if h['demand_bins'] else 0} / {h['capacity_per_bin']}</td>
           <td>{h['total_delay_min']:.0f} min</td><td>{h['total_co2_saved_kg']:,.0f} kg</td></tr>""")
 
+    routes = store.route_waste(days=days)
+    routes_simulated = not routes["routes"]
+    if routes_simulated:
+        routes = store.route_waste(days=days, include_simulated=True, min_samples=1)
+    route_rows = []
+    for rt in routes["routes"]:
+        total = rt["t_co2_per_week"] or 0
+        parts = "".join(
+            f'<span title="{CAUSE_LABELS[c]}: {v:,.1f} t" style="width:{v / total * 100:.1f}%;background:{CAUSE_COLOURS[c]}"></span>'
+            for c, v in rt["by_cause_t_per_week"].items() if total > 0 and v > 0)
+        main = rt["main_cause"]
+        share = rt["by_cause_t_per_week"][main] / total * 100 if main and total else 0
+        route_rows.append(f"""
+        <tr><td class="l">{html.escape(rt['origin'])} &rarr; {html.escape(rt['destination'])}</td>
+          <td class="l"><strong>{total:,.1f} t</strong></td>
+          <td class="l"><span class="stack">{parts}</span></td>
+          <td class="l">{CAUSE_LABELS.get(main, 'n/a')} ({share:.0f}%)</td>
+          <td>{rt['flights']}</td><td>{rt['samples']}</td></tr>""")
+    cause_total = sum(routes["by_cause_t_per_week"].values())
+    cause_cards = "".join(
+        f'<div class="card"><div class="k"><i style="display:inline-block;width:10px;height:10px;border-radius:2px;'
+        f'background:{CAUSE_COLOURS[c]};margin-right:6px"></i>{CAUSE_LABELS[c]}</div>'
+        f'<div class="v">{routes["by_cause_t_per_week"][c] / cause_total * 100 if cause_total else 0:.0f}%</div>'
+        f'<div class="k">{routes["by_cause_t_per_week"][c]:,.0f} t CO2 / week</div></div>'
+        for c in CAUSES)
+    legend = "".join(f'<span><i style="background:{CAUSE_COLOURS[c]}"></i>{CAUSE_LABELS[c]}</span>' for c in CAUSES)
+    routes_note = (' <span class="pill" style="background:#e76f51;color:#fff">simulated</span>'
+                   if routes_simulated and routes["routes"] else "")
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     banner = ('<div class="banner">SIMULATED PREVIEW: no live OpenSky runs recorded yet. '
               'These rankings use simulated traffic and say nothing about real airlines.</div>') if simulated else ""
@@ -94,6 +132,17 @@ def build_scoreboard(store: Store, output: Path, days: int = 7) -> Path:
     {''.join(table_rows) or '<tr><td colspan="9" style="text-align:center">No scored flights yet.</td></tr>'}
   </table></div>
 
+  <h2>Routes wasting the most CO2, and why{routes_note}</h2>
+  <div class="sub">Estimated tonnes of excess CO2 per week inside this airspace, from {routes['observed_hours']:,.1f} hours of
+    observation across {routes['runs']} runs.</div>
+  <div class="cards">{cause_cards}</div>
+  <div class="legend" style="margin:14px 0 8px">{legend}</div>
+  <div class="table-wrap"><table>
+    <tr><th style="text-align:left">Route</th><th style="text-align:left">Excess CO2 / week</th><th style="text-align:left">Why</th>
+        <th style="text-align:left">Main cause</th><th>Flights</th><th>Samples</th></tr>
+    {''.join(route_rows) or '<tr><td colspan="6" style="text-align:center">No attributed routes yet. Causes are recorded from this version on.</td></tr>'}
+  </table></div>
+
   <h2>Hub arrival pressure (latest snapshot)</h2>
   <div class="table-wrap"><table>
     <tr><th>Hub</th><th>State</th><th>Arrival rate</th><th>Inbound 3 h</th><th>Peak 15 min vs capacity</th>
@@ -107,6 +156,14 @@ def build_scoreboard(store: Store, output: Path, days: int = 7) -> Path:
     from NOAA GFS. Fuel flow comes from each aircraft's type; aircraft whose type cannot be found use a
     single-aisle reference. Flights below 10,000 ft or within 60 km of an airport
     are not scored. Airlines need at least 5 scored observations to be ranked.
+    <br><br>
+    <strong>Causes.</strong> Excess burn from not flying the great circle is put down to airport congestion when the
+    destination has an FAA delay program, ground stop or arrival delay (FAA NAS Status) or the engine's arrival queue
+    delays the flight, within 250 NM of it. Otherwise it is weather when a convective SIGMET (NOAA Aviation Weather
+    Center) is on or within 50 km of the direct path, and military or restricted airspace when the direct path crosses a
+    major warning area or restricted zone (approximate boundaries; activation schedules are not checked). Anything else
+    is ATC routing or unexplained. Excess burn from flying below or above the best level is shown separately. Weekly
+    tonnes are extrapolated from the hours observed.
   </div>
 </main></body></html>"""
     output.write_text(page, encoding="utf-8")
